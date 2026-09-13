@@ -6,6 +6,16 @@ failure. Built for the Paytm PML R2 exercise.
 Design reasoning, rejected alternatives and the AI disclosure are in
 [`WRITEUP.md`](./WRITEUP.md).
 
+**Live instance:** <https://wallet-service-y5wn.onrender.com> —
+[health](https://wallet-service-y5wn.onrender.com/actuator/health) ·
+[dashboard](https://wallet-service-y5wn.onrender.com/dashboard)
+
+It runs on a free tier in Singapore, which has two consequences worth knowing before you
+judge a slow response: the instance sleeps after ~15 minutes idle, so the first request
+after a pause pays a cold start of up to a minute, and the free database expires
+**30 days after creation (≈14 October 2026)**. The `docker compose up --build` path below
+needs nothing but Docker and does not expire.
+
 ---
 
 ## Getting started
@@ -66,8 +76,11 @@ PASS: GET /dashboard -> 200, and /metrics exposes latency histogram buckets
 Point it at any instance, including the deployed one:
 
 ```bash
-./scripts/burst_test.sh https://<deployed-host>
+./scripts/burst_test.sh https://wallet-service-y5wn.onrender.com
 ```
+
+That run passes all 11 probes against the deployed instance too — the invariants are
+properties of the design, not of a fast local machine.
 
 ### 4. Watch the dashboard
 
