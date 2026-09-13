@@ -1,0 +1,23 @@
+# Build output and IDE state — never belongs in the image, and busts the layer cache.
+target/
+out/
+build/
+.idea/
+*.iml
+.git/
+.gitignore
+.DS_Store
+
+# Documentation: read on GitHub, not needed at runtime.
+README.md
+WRITEUP.md
+learning.md
+.env.example
+.env
+
+# Deploy manifests are consumed by the host, not by the build.
+fly.toml
+render.yaml
+
+# The burst script runs against a deployed URL from the reviewer's machine.
+scripts/

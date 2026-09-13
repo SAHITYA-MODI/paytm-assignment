@@ -1,0 +1,35 @@
+# Render Blueprint — the one-click alternative to fly.toml.
+#
+# Push this repo to GitHub, then: Render dashboard -> New -> Blueprint -> pick the repo.
+# Render reads this file, builds the Dockerfile, provisions the free Postgres, and wires
+# DATABASE_URL in automatically. AUTH_TOKEN_SECRET is generated once and kept.
+#
+# Caveat worth knowing before choosing this over Fly: Render's free Postgres instance
+# expires after 30 days, and the free web service sleeps after ~15 minutes idle (so the
+# first request after a pause pays a cold start). Both are fine for review; neither is
+# fine for anything long-lived.
+
+databases:
+  - name: wallet-db
+    databaseName: wallet
+    user: wallet
+    plan: free
+
+services:
+  - type: web
+    name: wallet-service
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: singapore
+    healthCheckPath: /actuator/health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: wallet-db
+          property: connectionString
+      - key: AUTH_TOKEN_SECRET
+        generateValue: true
+      # Render's free Postgres caps connections well below the default pool size.
+      - key: DB_POOL_SIZE
+        value: "8"

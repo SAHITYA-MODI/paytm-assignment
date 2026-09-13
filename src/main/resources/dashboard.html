@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wallet Service — Live Metrics</title>
+<!--
+  Deliberately one self-contained file with no external requests: it is served by the
+  app itself, so it works on a free single-container host where there is nowhere to run
+  Prometheus + Grafana, and it keeps working with no network access to a CDN.
+  It polls GET /metrics (the same Prometheus exposition a real scraper would read) and
+  does the rate/percentile arithmetic client-side.
+-->
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --ink: #14161a; --muted: #667085;
+    --line: #e4e7ec; --accent: #1570ef; --ok: #12805c; --warn: #b54708; --bad: #b42318;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --panel: #171a21; --ink: #e8eaed; --muted: #98a2b3;
+      --line: #262b36; --accent: #5b9dff; --ok: #35c48f; --warn: #f79009; --bad: #f97066;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: 24px 16px 48px;
+  }
+  .wrap { max-width: 1040px; margin: 0 auto; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; margin-bottom: 20px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+  .status { margin-left: auto; font-size: 12px; color: var(--muted); }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); margin-right: 5px; }
+  .dot.stale { background: var(--bad); }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em;
+       color: var(--muted); margin: 26px 0 10px; font-weight: 600; }
+  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .value { font-size: 26px; font-weight: 620; letter-spacing: -0.02em;
+           font-variant-numeric: tabular-nums; }
+  .unit { font-size: 13px; font-weight: 400; color: var(--muted); margin-left: 3px; }
+  .value.ok { color: var(--ok); } .value.warn { color: var(--warn); } .value.bad { color: var(--bad); }
+  /* The only element that can exceed the viewport on a phone; scroll it rather than
+     letting the whole page scroll sideways. */
+  .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  table { width: 100%; min-width: 460px; border-collapse: collapse; background: var(--panel);
+          border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  th, td { text-align: left; padding: 9px 14px; border-bottom: 1px solid var(--line); }
+  th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); font-weight: 600; }
+  tr:last-child td { border-bottom: 0; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 18px; }
+  .hint code { background: var(--bg); padding: 1px 5px; border-radius: 4px; border: 1px solid var(--line); }
+  .err { background: var(--panel); border: 1px solid var(--bad); color: var(--bad);
+         border-radius: 10px; padding: 12px 16px; margin-bottom: 16px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Wallet Service — Live Metrics</h1>
+    <div class="status"><span class="dot" id="dot"></span><span id="status">connecting…</span></div>
+  </header>
+
+  <div class="err" id="err" hidden></div>
+
+  <h2>Domain counters</h2>
+  <div class="grid">
+    <div class="card"><div class="label">Transfers created</div><div class="value" id="created">–</div></div>
+    <div class="card"><div class="label">Succeeded</div><div class="value ok" id="succeeded">–</div></div>
+    <div class="card"><div class="label">Declined — insufficient funds</div><div class="value warn" id="declined">–</div></div>
+    <div class="card"><div class="label">Idempotent replays</div><div class="value" id="replays">–</div></div>
+    <div class="card"><div class="label">Idempotency conflicts (409)</div><div class="value" id="conflicts">–</div></div>
+  </div>
+
+  <h2>HTTP</h2>
+  <div class="grid">
+    <div class="card"><div class="label">Request rate</div>
+      <div class="value" id="rate">–<span class="unit">req/s</span></div></div>
+    <div class="card"><div class="label">Latency p99</div>
+      <div class="value" id="p99">–<span class="unit">ms</span></div></div>
+    <div class="card"><div class="label">Latency p50</div>
+      <div class="value" id="p50">–<span class="unit">ms</span></div></div>
+    <div class="card"><div class="label">Error rate</div>
+      <div class="value" id="errRate">–<span class="unit">%</span></div></div>
+    <div class="card"><div class="label">Total requests</div>
+      <div class="value" id="reqTotal">–</div></div>
+  </div>
+
+  <h2>By endpoint</h2>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Method</th><th>Path</th><th>Status</th>
+      <th class="num">Count</th><th class="num">Mean</th></tr></thead>
+    <tbody id="rows"><tr><td colspan="5" style="color:var(--muted)">waiting for data…</td></tr></tbody>
+  </table>
+  </div>
+
+  <p class="hint">
+    Polls <code>GET /metrics</code> every 2s — the same Prometheus exposition a scraper reads.
+    Rates are computed from deltas between polls, so they need two polls to appear.
+    Generate traffic with <code>./scripts/burst_test.sh</code> and watch these move.
+  </p>
+</div>
+
+<script>
+const POLL_MS = 2000;
+let prev = null;   // { t, count, errors }
+
+// --- Prometheus text format parser -----------------------------------------
+// Turns `name{k="v",k2="v2"} 12.0` into {name, labels:{k,k2}, value}. Ignores
+// comments and the OpenMetrics `_created` companion series.
+function parsePrometheus(text) {
+  const out = [];
+  for (const line of text.split("\n")) {
+    const s = line.trim();
+    if (!s || s[0] === "#") continue;
+    const brace = s.indexOf("{");
+    let name, labels = {}, rest;
+    if (brace === -1) {
+      const sp = s.indexOf(" ");
+      if (sp === -1) continue;
+      name = s.slice(0, sp);
+      rest = s.slice(sp + 1);
+    } else {
+      name = s.slice(0, brace);
+      const close = s.lastIndexOf("}");
+      if (close === -1) continue;
+      for (const part of s.slice(brace + 1, close).split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/)) {
+        const eq = part.indexOf("=");
+        if (eq === -1) continue;
+        labels[part.slice(0, eq).trim()] = part.slice(eq + 1).trim().replace(/^"|"$/g, "");
+      }
+      rest = s.slice(close + 1);
+    }
+    const value = parseFloat(rest.trim().split(/\s+/)[0]);
+    if (!Number.isNaN(value)) out.push({ name, labels, value });
+  }
+  return out;
+}
+
+const sumOf = (rows, name, pred = () => true) =>
+  rows.filter(r => r.name === name && pred(r.labels)).reduce((a, r) => a + r.value, 0);
+
+// Linear interpolation inside the bucket the quantile falls into. Cumulative
+// histogram buckets are summed across every label combination first, so this is
+// the p99 over all endpoints rather than per-endpoint.
+function quantileFromBuckets(rows, q) {
+  const buckets = new Map();
+  for (const r of rows) {
+    if (r.name !== "http_server_requests_seconds_bucket") continue;
+    const le = r.labels.le === "+Inf" ? Infinity : parseFloat(r.labels.le);
+    buckets.set(le, (buckets.get(le) || 0) + r.value);
+  }
+  if (!buckets.size) return null;
+  const sorted = [...buckets.entries()].sort((a, b) => a[0] - b[0]);
+  const total = sorted[sorted.length - 1][1];
+  if (!total) return null;
+  const target = q * total;
+  let prevLe = 0, prevCount = 0;
+  for (const [le, count] of sorted) {
+    if (count >= target) {
+      if (le === Infinity) return prevLe;
+      const span = count - prevCount;
+      return span <= 0 ? le : prevLe + (le - prevLe) * ((target - prevCount) / span);
+    }
+    prevLe = le; prevCount = count;
+  }
+  return null;
+}
+
+const fmt = n => n === null || n === undefined || Number.isNaN(n) ? "–"
+  : n >= 1000 ? Math.round(n).toLocaleString() : (Math.round(n * 100) / 100).toLocaleString();
+
+function setValue(id, text, cls) {
+  const el = document.getElementById(id);
+  const unit = el.querySelector(".unit");
+  el.textContent = text;
+  if (unit) el.appendChild(unit);
+  if (cls !== undefined) el.className = "value" + (cls ? " " + cls : "");
+}
+
+async function tick() {
+  let rows;
+  try {
+    const res = await fetch("/metrics", { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    rows = parsePrometheus(await res.text());
+    document.getElementById("err").hidden = true;
+    document.getElementById("dot").classList.remove("stale");
+    document.getElementById("status").textContent = "live · updated " + new Date().toLocaleTimeString();
+  } catch (e) {
+    const err = document.getElementById("err");
+    err.hidden = false;
+    err.textContent = "Could not read /metrics — " + e.message;
+    document.getElementById("dot").classList.add("stale");
+    document.getElementById("status").textContent = "disconnected";
+    return;
+  }
+
+  // Domain counters. transfers_total carries an `outcome` label; created is the sum.
+  const succeeded = sumOf(rows, "transfers_total", l => l.outcome === "succeeded");
+  const declined  = sumOf(rows, "transfers_total", l => l.outcome === "declined_insufficient_funds");
+  setValue("created",   fmt(succeeded + declined));
+  setValue("succeeded", fmt(succeeded));
+  setValue("declined",  fmt(declined));
+  setValue("replays",   fmt(sumOf(rows, "transfers_idempotent_replays_total")));
+  setValue("conflicts", fmt(sumOf(rows, "transfers_idempotency_conflicts_total")));
+
+  // HTTP. `outcome` on http_server_requests is SUCCESS / CLIENT_ERROR / SERVER_ERROR.
+  const count  = sumOf(rows, "http_server_requests_seconds_count");
+  const errors = sumOf(rows, "http_server_requests_seconds_count",
+                       l => l.status && parseInt(l.status, 10) >= 400);
+  setValue("reqTotal", fmt(count));
+
+  const now = Date.now();
+  if (prev && now > prev.t) {
+    const dt = (now - prev.t) / 1000;
+    const dCount = count - prev.count;
+    const dErr = errors - prev.errors;
+    setValue("rate", fmt(Math.max(0, dCount) / dt));
+    if (dCount > 0) {
+      const pct = (dErr / dCount) * 100;
+      setValue("errRate", fmt(pct), pct > 5 ? "bad" : pct > 0 ? "warn" : "ok");
+    }
+  }
+  prev = { t: now, count, errors };
+
+  const p99 = quantileFromBuckets(rows, 0.99);
+  const p50 = quantileFromBuckets(rows, 0.50);
+  setValue("p99", p99 === null ? "–" : fmt(p99 * 1000), p99 !== null && p99 > 1 ? "warn" : "");
+  setValue("p50", p50 === null ? "–" : fmt(p50 * 1000));
+
+  // Per-endpoint breakdown, busiest first.
+  const perEndpoint = rows
+    .filter(r => r.name === "http_server_requests_seconds_count" && r.value > 0)
+    .map(r => {
+      const sum = rows.find(x => x.name === "http_server_requests_seconds_sum"
+        && x.labels.uri === r.labels.uri && x.labels.method === r.labels.method
+        && x.labels.status === r.labels.status);
+      return { ...r.labels, count: r.value, mean: sum ? (sum.value / r.value) * 1000 : null };
+    })
+    .sort((a, b) => b.count - a.count);
+
+  document.getElementById("rows").innerHTML = perEndpoint.length
+    ? perEndpoint.map(e => `<tr>
+        <td><code>${e.method || "?"}</code></td>
+        <td><code>${e.uri || "?"}</code></td>
+        <td><code>${e.status || "?"}</code></td>
+        <td class="num">${fmt(e.count)}</td>
+        <td class="num">${e.mean === null ? "–" : fmt(e.mean) + " ms"}</td>
+      </tr>`).join("")
+    : `<tr><td colspan="5" style="color:var(--muted)">no requests yet</td></tr>`;
+}
+
+tick();
+setInterval(tick, POLL_MS);
+</script>
+</body>
+</html>

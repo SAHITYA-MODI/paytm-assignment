@@ -1,0 +1,41 @@
+# Fly.io deployment. Chosen as the primary target because its free allowance runs a
+# container continuously without the 30-day database expiry other free tiers apply.
+#
+#   fly launch --no-deploy --copy-config     # creates the app, keeps this config
+#   fly postgres create --name wallet-db     # free managed Postgres
+#   fly postgres attach wallet-db            # injects DATABASE_URL as a secret
+#   fly secrets set AUTH_TOKEN_SECRET="$(openssl rand -base64 32)"
+#   fly deploy
+#
+# DATABASE_URL arrives in postgres:// form; DatabaseUrlEnvironmentPostProcessor converts
+# it to JDBC and adds sslmode=require. No other configuration is required.
+
+app = "paytm-wallet-service"
+primary_region = "bom"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  # Fly's free Postgres allows few connections and this runs one instance.
+  DB_POOL_SIZE = "10"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Money must not be lost to a cold start mid-transfer, and a stopped machine cannot
+  # serve the burst script a reviewer runs without warning.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    path = "/actuator/health"
+    interval = "15s"
+    timeout = "4s"
+    grace_period = "40s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

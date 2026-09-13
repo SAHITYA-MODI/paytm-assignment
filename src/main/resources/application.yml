@@ -1,0 +1,75 @@
+spring:
+  application:
+    name: wallet-service
+  main:
+    # The ASCII-art banner is the only thing this process writes that isn't JSON. Off, so
+    # "every log line is a JSON object" is literally true and `docker compose logs | jq`
+    # works without having to skip unparseable lines.
+    banner-mode: off
+  datasource:
+    # Deployed hosts set a single DATABASE_URL instead; DatabaseUrlEnvironmentPostProcessor
+    # translates it and takes precedence over everything below.
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:wallet}
+    username: ${DB_USER:wallet}
+    password: ${DB_PASSWORD:wallet}
+    hikari:
+      # The pool size, not the Tomcat thread count, is the real concurrency ceiling for a
+      # workload whose every request holds a row lock. Kept modest on purpose: free-tier
+      # managed Postgres caps total connections, and queueing for a connection is much
+      # cheaper than being refused one.
+      maximum-pool-size: ${DB_POOL_SIZE:15}
+      connection-timeout: 20000
+      # Without these, one stuck row lock parks a request (and its connection) until the
+      # client gives up. lock_timeout bounds waiting for a contended wallet row;
+      # statement_timeout is the outer backstop. Both fail the request cleanly instead of
+      # leaking the connection out of the pool. Sized well above the worst case measured
+      # under the burst script (20 transfers queued on one wallet) so that contention
+      # queues rather than erroring, while a genuinely wedged lock still gives up.
+      connection-init-sql: "SET lock_timeout = '10s'; SET statement_timeout = '20s'"
+  jpa:
+    # CRITICAL, not a tuning knob. With open-in-view (Spring Boot's default) a single
+    # EntityManager — and therefore a single first-level cache — spans the whole HTTP
+    # request. Any wallet read earlier in the request (the ownership check in
+    # TransferService) would then be returned from that cache by
+    # findByIdForUpdate(), so the SELECT ... FOR UPDATE would take the row lock but the
+    # balance we computed from would be the STALE pre-lock value. That silently breaks
+    # both no-overdraft and conservation under concurrency; the burst script's overdraft
+    # probe reproduces it in one run. Off means each @Transactional gets a fresh
+    # persistence context, so the locked read is the authoritative one.
+    open-in-view: false
+    hibernate:
+      # Flyway (below) now owns the schema; Hibernate just validates its entity
+      # mappings still match what Flyway created (learning.md #17.3).
+      ddl-auto: validate
+    # show-sql / format_sql are deliberately absent: Hibernate writes those straight to
+    # System.out, bypassing Logback, so they would interleave raw multi-line SQL into the
+    # structured JSON log stream — and the string formatting is a real cost under burst
+    # load. Enable per-run with --spring.jpa.show-sql=true when debugging locally.
+  flyway:
+    enabled: true
+
+wallet:
+  auth:
+    # Signs the per-user bearer tokens (see ApiToken). Override in any deployed
+    # environment; the default exists only so `docker compose up` works with no setup.
+    token-secret: ${AUTH_TOKEN_SECRET:local-dev-secret-not-for-production}
+
+server:
+  port: ${PORT:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # Actuator only exposes /health over HTTP by default; everything else (including
+        # /metrics and /prometheus) is opt-in on purpose (learning.md #15.1).
+        include: health,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    distribution:
+      percentiles-histogram:
+        # Histogram buckets, not client-computed percentiles, so p99 stays correct if
+        # this ever scales beyond one instance (learning.md #15.4).
+        http.server.requests: true
