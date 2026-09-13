@@ -14,6 +14,7 @@ databases:
     databaseName: wallet
     user: wallet
     plan: free
+    region: singapore
 
 services:
   - type: web
